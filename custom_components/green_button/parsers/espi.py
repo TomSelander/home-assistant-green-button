@@ -636,57 +636,42 @@ class EspiEntry:
 
 def parse_xml(value: str) -> list[model.UsagePoint]:
     """Parse an ESPI atom feed XML string."""
-    logger.info("Starting XML parsing")
+    logger.debug("Starting XML parsing (len=%d)", len(value) if value is not None else 0)
     try:
         root = defusedET.fromstring(value)
     except ET.ParseError as ex:
+        logger.exception("XML parsing failed: invalid XML")
         raise EspiXmlParseError("Invalid XML.") from ex
-    else:
-        feed = GreenButtonFeed(root)
 
-        # Debug: Log what entries we found
-        logger.info("Found %d UsagePoint entries", len(feed.find_entries("UsagePoint")))
-        logger.info(
-            "Found %d MeterReading entries", len(feed.find_entries("MeterReading"))
-        )
-        logger.info(
-            "Found %d IntervalBlock entries", len(feed.find_entries("IntervalBlock"))
-        )
-        logger.info(
-            "Found %d ReadingType entries", len(feed.find_entries("ReadingType"))
-        )
+    feed = GreenButtonFeed(root)
 
-        usage_points = feed.to_usage_points()
+    # Debug-level counts for troubleshooting
+    logger.debug(
+        "Feed entry counts: UsagePoint=%d, MeterReading=%d, IntervalBlock=%d, ReadingType=%d",
+        len(feed.find_entries("UsagePoint")),
+        len(feed.find_entries("MeterReading")),
+        len(feed.find_entries("IntervalBlock")),
+        len(feed.find_entries("ReadingType")),
+    )
 
-        # Debug: Log the parsed structure
-        for i, up in enumerate(usage_points):
-            logger.info(
-                "UsagePoint %d: id=%s, device_class=%s",
-                i,
-                up.id,
-                up.sensor_device_class,
-            )
-            logger.info("UsagePoint %d: %d meter readings", i, len(up.meter_readings))
-            for j, mr in enumerate(up.meter_readings):
-                logger.info(
-                    "  MeterReading %d: id=%s, %d interval blocks",
-                    j,
-                    mr.id,
-                    len(mr.interval_blocks),
+    usage_points = feed.to_usage_points()
+
+    # Summary info (info-level) and detailed debug dumps
+    total_readings = sum(len(up.meter_readings) for up in usage_points)
+    logger.info(
+        "Parsed %d usage point(s) with %d total meter readings",
+        len(usage_points),
+        total_readings,
+    )
+
+    for i, up in enumerate(usage_points):
+        logger.debug("UsagePoint[%d]: id=%s, device_class=%s", i, up.id, up.sensor_device_class)
+        logger.debug("UsagePoint[%d]: meter_readings=%d, usage_summaries=%d", i, len(up.meter_readings), len(up.usage_summaries))
+        for j, mr in enumerate(up.meter_readings):
+            logger.debug("  MeterReading[%d]: id=%s, interval_blocks=%d", j, mr.id, len(mr.interval_blocks))
+            for k, ib in enumerate(mr.interval_blocks):
+                logger.debug(
+                    "    IntervalBlock[%d]: id=%s, interval_readings=%d", k, ib.id, len(ib.interval_readings)
                 )
-                for k, ib in enumerate(mr.interval_blocks):
-                    logger.info(
-                        "    IntervalBlock %d: id=%s, %d interval readings",
-                        k,
-                        ib.id,
-                        len(ib.interval_readings),
-                    )
-                    if ib.interval_readings:
-                        first_reading = ib.interval_readings[0]
-                        logger.info(
-                            "      First reading: start=%s, value=%d",
-                            first_reading.start,
-                            first_reading.value,
-                        )
 
-        return usage_points
+    return usage_points

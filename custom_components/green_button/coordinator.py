@@ -72,35 +72,38 @@ class GreenButtonCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             new_usage_points = usage_points or []
 
-            # Log what we're processing
-            total_readings = sum(len(up.meter_readings) for up in new_usage_points)
-            _LOGGER.info(
-                "Processing %d usage points with %d total meter readings",
+            # Debug: show parsed usage point ids for troubleshooting
+            try:
+                new_ids = [up.id for up in new_usage_points]
+            except Exception:
+                new_ids = []
+            total_new_readings = sum(len(up.meter_readings) for up in new_usage_points)
+            _LOGGER.debug(
+                "Parsed %d new usage points (%d readings): %s",
                 len(new_usage_points),
-                total_readings,
+                total_new_readings,
+                new_ids,
             )
 
             # Merge new data with existing data (combine multiple imports)
             self._merge_usage_points(new_usage_points)
 
-            # Debug: Log detailed data structure
-            for i, up in enumerate(self.usage_points):
-                _LOGGER.info(
-                    "UsagePoint %d: %d meter readings", i, len(up.meter_readings)
-                )
-                for j, mr in enumerate(up.meter_readings):
-                    _LOGGER.info(
-                        "  MeterReading %d: %d intervals", j, len(mr.interval_blocks)
-                    )
-
             # Update the data and notify all entities
             self.async_set_updated_data({"usage_points": self.usage_points})
 
-            _LOGGER.info("Successfully updated coordinator with new data")
+            total_readings = sum(len(up.meter_readings) for up in self.usage_points)
+            _LOGGER.info(
+                "Updated coordinator: %d usage points, %d total meter readings",
+                len(self.usage_points),
+                total_readings,
+            )
 
+        except (ValueError, espi.EspiXmlParseError) as err:
+            _LOGGER.error("Failed to parse XML data: %s", err)
+            raise UpdateFailed(f"Invalid XML format: {err}") from err
         except Exception as err:
-            _LOGGER.error("Error adding Green Button XML data: %s", err)
-            raise UpdateFailed(f"Error adding Green Button XML data: {err}") from err
+            _LOGGER.error("Unexpected error updating Green Button data: %s", err)
+            raise UpdateFailed(f"Unexpected error: {err}") from err
 
     def has_existing_entities(self) -> bool:
         """Check if entities already exist for the current data."""
@@ -118,7 +121,7 @@ class GreenButtonCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
 
         try:
-            _LOGGER.info("Loading stored XML data from config entry (restart)")
+            _LOGGER.debug("Loading stored XML data from config entry")
             # Parse stored XML data
             usage_points = await self.hass.async_add_executor_job(
                 espi.parse_xml, xml_data
@@ -128,13 +131,17 @@ class GreenButtonCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Update the data and notify all entities
             self.async_set_updated_data({"usage_points": self.usage_points})
 
+            total_readings = sum(len(up.meter_readings) for up in self.usage_points)
             _LOGGER.info(
-                "Successfully loaded %d usage points from stored data",
+                "Loaded %d usage points from stored data (%d meter readings)",
                 len(self.usage_points),
+                total_readings,
             )
 
-        except (ValueError, OSError) as err:
-            _LOGGER.warning("Failed to load stored XML data: %s", err)
+        except espi.EspiXmlParseError as err:
+            _LOGGER.error("Stored XML data is invalid and cannot be parsed: %s", err)
+        except Exception as err:
+            _LOGGER.error("Unexpected error loading stored XML data: %s", err)
 
     def _merge_usage_points(self, new_usage_points: list[model.UsagePoint]) -> None:
         """Merge new usage points with existing ones, combining interval blocks."""

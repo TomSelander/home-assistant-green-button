@@ -72,11 +72,15 @@ class GreenButtonSensor(CoordinatorEntity[GreenButtonCoordinator], SensorEntity)
     @property
     def native_value(self) -> float | None:
         """Return the current energy value."""
-        if not self.coordinator.data or not self.coordinator.data.get("usage_points"):
-            return None
+        try:
+            if not self.coordinator.data or not self.coordinator.data.get("usage_points"):
+                return None
 
-        meter_reading = self.coordinator.get_meter_reading_by_id(self._meter_reading_id)
-        if not meter_reading:
+            meter_reading = self.coordinator.get_meter_reading_by_id(self._meter_reading_id)
+            if not meter_reading:
+                return None
+        except (AttributeError, KeyError) as err:
+            _LOGGER.warning("Error accessing meter reading %s: %s", self._meter_reading_id, err)
             return None
 
         # Calculate total energy from all interval blocks
