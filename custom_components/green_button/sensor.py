@@ -84,7 +84,7 @@ class GreenButtonSensor(CoordinatorEntity[GreenButtonCoordinator], SensorEntity)
             return None
 
         # Calculate total energy from all interval blocks
-        total_energy = 0
+        total_energy_wh = 0
         for interval_block in meter_reading.interval_blocks:
             for interval_reading in interval_block.interval_readings:
                 if interval_reading.value is not None:
@@ -92,13 +92,23 @@ class GreenButtonSensor(CoordinatorEntity[GreenButtonCoordinator], SensorEntity)
                     power_multiplier = (
                         interval_reading.reading_type.power_of_ten_multiplier
                     )
-                    value = interval_reading.value * (10**power_multiplier)
-                    total_energy += value
+                    value_wh = interval_reading.value * (10**power_multiplier)
+                    total_energy_wh += value_wh
+                    _LOGGER.debug(
+                        "Energy reading: raw=%d, power_mult=%d, scaled_wh=%.0f",
+                        interval_reading.value,
+                        power_multiplier,
+                        value_wh,
+                    )
 
-        # Convert from Wh to kWh if needed
-        if total_energy > 0:
-            return total_energy / 1000.0
-        return 0
+        # Convert from Wh to kWh
+        total_energy_kwh = total_energy_wh / 1000.0 if total_energy_wh > 0 else 0
+        _LOGGER.debug(
+            "Energy total: %.0f Wh -> %.3f kWh",
+            total_energy_wh,
+            total_energy_kwh,
+        )
+        return total_energy_kwh
 
     @property
     def available(self) -> bool:
@@ -213,7 +223,7 @@ class GreenButtonSensor(CoordinatorEntity[GreenButtonCoordinator], SensorEntity)
     ) -> None:
         """Update the entity's state and statistics to match the reading."""
         # Calculate total energy from all interval blocks
-        total_energy = 0
+        total_energy_wh = 0
         for interval_block in meter_reading.interval_blocks:
             for interval_reading in interval_block.interval_readings:
                 if interval_reading.value is not None:
@@ -221,14 +231,12 @@ class GreenButtonSensor(CoordinatorEntity[GreenButtonCoordinator], SensorEntity)
                     power_multiplier = (
                         interval_reading.reading_type.power_of_ten_multiplier
                     )
-                    value = interval_reading.value * (10**power_multiplier)
-                    total_energy += value
+                    value_wh = interval_reading.value * (10**power_multiplier)
+                    total_energy_wh += value_wh
 
-        # Convert from Wh to kWh if needed
-        if total_energy > 0:
-            self._attr_native_value = total_energy / 1000.0
-        else:
-            self._attr_native_value = 0
+        # Convert from Wh to kWh
+        total_energy_kwh = total_energy_wh / 1000.0 if total_energy_wh > 0 else 0
+        self._attr_native_value = total_energy_kwh
 
         # Update the entity state
         self.async_write_ha_state()
@@ -296,14 +304,30 @@ class GreenButtonCostSensor(CoordinatorEntity[GreenButtonCoordinator], SensorEnt
         if currency:
             self._attr_native_unit_of_measurement = currency
 
-        total_cost = 0.0
+        total_cost_minor = 0.0
         for interval_block in meter_reading.interval_blocks:
             for interval_reading in interval_block.interval_readings:
                 cost_raw = getattr(interval_reading, "cost", 0) or 0
                 power_multiplier = interval_reading.reading_type.power_of_ten_multiplier
-                total_cost += cost_raw * (10 ** power_multiplier)
+                cost_minor = cost_raw * (10 ** power_multiplier)
+                total_cost_minor += cost_minor
+                _LOGGER.debug(
+                    "Cost reading: raw=%d, power_mult=%d, minor_units=%.0f",
+                    cost_raw,
+                    power_multiplier,
+                    cost_minor,
+                )
 
-        return float(total_cost)
+        # Convert from minor units (cents) to major units (dollars)
+        # Cost in ESPI is typically stored as minor units (cents); divide by 100
+        total_cost_major = total_cost_minor / 100.0
+        _LOGGER.debug(
+            "Cost total: %.0f minor units -> %.2f major units (%s)",
+            total_cost_minor,
+            total_cost_major,
+            currency or "unknown currency",
+        )
+        return float(total_cost_major)
 
     @property
     def available(self) -> bool:
@@ -372,19 +396,22 @@ class GreenButtonCostSensor(CoordinatorEntity[GreenButtonCoordinator], SensorEnt
 
     async def update_sensor_and_statistics(self, meter_reading: model.MeterReading) -> None:
         # Update state
-        total_cost = 0.0
+        total_cost_minor = 0.0
         for interval_block in meter_reading.interval_blocks:
             for interval_reading in interval_block.interval_readings:
                 cost_raw = getattr(interval_reading, "cost", 0) or 0
                 power_multiplier = interval_reading.reading_type.power_of_ten_multiplier
-                total_cost += cost_raw * (10 ** power_multiplier)
+                total_cost_minor += cost_raw * (10 ** power_multiplier)
+
+        # Convert from minor units (cents) to major units (dollars)
+        total_cost_major = total_cost_minor / 100.0
 
         # Set currency
         currency = getattr(meter_reading.reading_type, "currency", None)
         if currency:
             self._attr_native_unit_of_measurement = currency
 
-        self._attr_native_value = float(total_cost)
+        self._attr_native_value = float(total_cost_major)
         self.async_write_ha_state()
 
         # Update long-term statistics
