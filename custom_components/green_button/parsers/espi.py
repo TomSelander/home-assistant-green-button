@@ -523,17 +523,8 @@ class EspiEntry:
                                 flow_direction = rt_entry.parse_child_text("espi:flowDirection", int)
                                 interval_length = rt_entry.parse_child_text("espi:intervalLength", int)
                                 
-                                # For electricity: include sub-daily consumption (< 86400)
-                                # For gas: include daily consumption (== 86400)
-                                if (
-                                    sensor_device_class == sensor.SensorDeviceClass.ENERGY
-                                    and flow_direction == 1
-                                    and interval_length < 86400
-                                ) or (
-                                    sensor_device_class == sensor.SensorDeviceClass.GAS
-                                    and flow_direction == 1
-                                    and interval_length == 86400
-                                ):
+                                # Include consumption data (flowDirection=1) for any interval length
+                                if flow_direction == 1:
                                     logger.info(
                                         "Including MeterReading %s (flowDirection=%d, intervalLength=%d)",
                                         mr_href, flow_direction, interval_length
