@@ -385,7 +385,20 @@ class EspiEntry:
             # Check for exact match or prefix match (for feed vs entry hrefs)
             for related_href in related_hrefs:
                 if related_entry_href == related_href or related_entry_href.startswith(related_href + "/"):
-                    matches.append(parser(related_entry))
+                    try:
+                        parsed = parser(related_entry)
+                        if parsed is None:
+                            # parser chose to skip
+                            break
+                        # parser may return a single item or a list of items
+                        if isinstance(parsed, list):
+                            matches.extend(parsed)
+                        else:
+                            matches.append(parsed)
+                    except EspiXmlParseError as ex:
+                        logger.warning("Skipping related entry %s due to parse error: %s", related_entry_href, ex)
+                    except Exception as ex:
+                        logger.exception("Unexpected error parsing related entry %s: %s", related_entry_href, ex)
                     break
         return matches
 
@@ -425,22 +438,47 @@ class EspiEntry:
         self, reading_type: model.ReadingType
     ) -> Callable[["EspiEntry"], model.IntervalBlock]:
         """Create an IntervalBlock parser for the ReadingType."""
+        def parser(entry: EspiEntry):
+            # Handle feeds where a single atom:entry may contain multiple IntervalBlock elements
+            content_blocks = entry._elem.findall("./atom:content/espi:IntervalBlock", _NAMESPACE_MAP)
+            results: list[model.IntervalBlock] = []
+            if not content_blocks:
+                raise EspiXmlParseError(
+                    f"No IntervalBlock elements found for entry:\n{entry._pretty_print()}"
+                )
 
-        def parser(entry: EspiEntry) -> model.IntervalBlock:
-            return model.IntervalBlock(
-                id=entry.find_self_href(),
-                reading_type=reading_type,
-                start=entry.parse_child_text(
-                    "espi:interval/espi:start", _to_utc_datetime
-                ),
-                duration=entry.parse_child_text(
-                    "espi:interval/espi:duration", _to_timedelta
-                ),
-                interval_readings=entry.parse_child_elems(
-                    "espi:IntervalReading",
-                    entry.create_interval_reading_parser(reading_type),
-                ),
-            )
+            for idx, block in enumerate(content_blocks):
+                # Parse start and duration relative to the block element
+                starts = block.findall("./espi:interval/espi:start", _NAMESPACE_MAP)
+                durs = block.findall("./espi:interval/espi:duration", _NAMESPACE_MAP)
+                if len(starts) != 1 or len(durs) != 1:
+                    raise EspiXmlParseError(
+                        f"Invalid interval in IntervalBlock for entry:\n{ET.tostring(block, encoding='unicode')}"
+                    )
+                start = _to_utc_datetime(starts[0].text)
+                duration = _to_timedelta(durs[0].text)
+
+                # Parse IntervalReading elements under this block
+                interval_readings = _parse_child_elems(
+                    block, "./espi:IntervalReading", entry.create_interval_reading_parser(reading_type)
+                )
+
+                # Create an ID per-block to ensure uniqueness if multiple blocks exist in one atom:entry
+                base_id = entry.find_self_href()
+                block_id = f"{base_id}#{idx}" if len(content_blocks) > 1 else base_id
+
+                results.append(
+                    model.IntervalBlock(
+                        id=block_id,
+                        reading_type=reading_type,
+                        start=start,
+                        duration=duration,
+                        interval_readings=interval_readings,
+                    )
+                )
+
+            # Return single block or list of blocks
+            return results[0] if len(results) == 1 else results
 
         return parser
 
