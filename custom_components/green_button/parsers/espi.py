@@ -127,22 +127,64 @@ def _to_timedelta(duration: str) -> datetime.timedelta:
     return datetime.timedelta(seconds=int(duration))
 
 
+def _intervals_match(
+    interval_duration: datetime.timedelta,
+    reading_type_interval_length: int,
+    tolerance_seconds: int = 86400,
+) -> bool:
+    """Check if an interval duration matches a ReadingType's interval length.
+    
+    Allows reasonable drift (±tolerance_seconds) to support calendar months
+    and other variable-length intervals. Default tolerance is ±1 day (86400 seconds).
+    
+    Args:
+        interval_duration: The duration from an IntervalBlock or IntervalReading
+        reading_type_interval_length: The intervalLength from a ReadingType (in seconds)
+        tolerance_seconds: Maximum allowed deviation (default 1 day)
+    
+    Returns:
+        True if the durations match within tolerance, False otherwise
+    """
+    interval_seconds = int(interval_duration.total_seconds())
+    diff = abs(interval_seconds - reading_type_interval_length)
+    return diff <= tolerance_seconds
+
+
 class GreenButtonFeed:
     """A wrapper around a Green Button atom Feed XML element."""
 
     def __init__(self, xml: ET.Element) -> None:
         """Create a new instance."""
         self._xml = xml
+        self._entry_id_counters: dict[str, int] = {}
+
+    def _get_unique_entry_id(self, base_id: str) -> str:
+        """Generate a unique entry ID by appending a suffix if the ID already exists."""
+        if base_id not in self._entry_id_counters:
+            self._entry_id_counters[base_id] = 0
+            return base_id
+        
+        self._entry_id_counters[base_id] += 1
+        return f"{base_id}-{self._entry_id_counters[base_id]}"
 
     def find_entries(self, entry_type_tag: str) -> list["EspiEntry"]:
         """Find all atom entries whose root data tag has the specified name."""
-        return [
-            EspiEntry(self, elem, entry_type_tag)
-            for elem in self._xml.findall(
-                f"./atom:entry/atom:content/espi:{entry_type_tag}/../..",
-                _NAMESPACE_MAP,
-            )
-        ]
+        entries = []
+        for elem in self._xml.findall(
+            f"./atom:entry/atom:content/espi:{entry_type_tag}/../..",
+            _NAMESPACE_MAP,
+        ):
+            try:
+                entry = EspiEntry(self, elem, entry_type_tag)
+                # Ensure unique IDs by checking and updating if collision occurs
+                self_href = entry.find_self_href()
+                unique_id = self._get_unique_entry_id(self_href)
+                entry._unique_id = unique_id
+                entries.append(entry)
+            except EspiXmlParseError:
+                # If we can't get the self href, just add without unique ID
+                entries.append(EspiEntry(self, elem, entry_type_tag))
+        return entries
 
     def to_usage_points(self) -> list[model.UsagePoint]:
         """Parse the feed into UsagePoints."""
@@ -177,7 +219,8 @@ class GreenButtonFeed:
                 interval_length = rt_entry.parse_child_text("espi:intervalLength", int)
 
                 if flow_direction == 1:  # Energy consumed
-                    # Skip daily summaries (intervalLength >= 86400 seconds = 24 hours)
+                    # Skip daily summaries and longer intervals (intervalLength >= 86400 seconds = 24 hours)
+                    # to focus on sub-daily consumption data
                     if interval_length >= 86400:
                         logger.info(
                             "Skipping daily summary ReadingType: %s (intervalLength=%d seconds)",
@@ -245,7 +288,12 @@ class GreenButtonFeed:
     def _create_meter_reading_with_reading_type(
         self, mr_entry: "EspiEntry", reading_type: model.ReadingType
     ) -> model.MeterReading:
-        """Create a MeterReading with the given ReadingType and associated IntervalBlocks."""
+        """Create a MeterReading with the given ReadingType and associated IntervalBlocks.
+        
+        This method handles multiple IntervalBlocks within the MeterReading entry
+        or related IntervalBlock entries. It defers ReadingType resolution by first
+        storing href references and then resolving them.
+        """
         logger = logging.getLogger(__name__)
 
         mr_href = mr_entry.find_self_href()
@@ -253,7 +301,28 @@ class GreenButtonFeed:
 
         logger.debug("MeterReading %s has related hrefs: %s", mr_href, mr_related_hrefs)
 
-        # Find related interval blocks for this meter reading
+        # First, try to parse all IntervalBlocks directly from this MeterReading entry
+        # (for batch feeds where multiple blocks are in one entry)
+        try:
+            interval_blocks = mr_entry.parse_all_interval_blocks(reading_type)
+            if interval_blocks:
+                logger.info(
+                    "MeterReading %s found %d IntervalBlocks directly in entry",
+                    mr_href,
+                    len(interval_blocks),
+                )
+                return model.MeterReading(
+                    id=mr_href,
+                    reading_type=reading_type,
+                    interval_blocks=interval_blocks,
+                )
+        except EspiXmlParseError:
+            logger.debug(
+                "No IntervalBlocks found directly in MeterReading %s, trying related entries",
+                mr_href,
+            )
+
+        # If no blocks in the entry itself, find related interval blocks for this meter reading
         interval_blocks = mr_entry.find_related_entries(
             "IntervalBlock",
             mr_entry.create_interval_block_parser(reading_type),
@@ -336,6 +405,7 @@ class EspiEntry:
         self._root = root
         self._elem = elem
         self._type_tag = type_tag
+        self._unique_id = None  # Will be set by GreenButtonFeed if needed
 
     def _pretty_print(self) -> str:
         return _pretty_print(self._elem)
@@ -441,6 +511,69 @@ class EspiEntry:
 
         return parser
 
+    def parse_all_interval_blocks(
+        self, reading_type: model.ReadingType
+    ) -> list[model.IntervalBlock]:
+        """Parse all IntervalBlock child elements from this entry.
+        
+        This is used for batch feeds where an entry may contain multiple IntervalBlocks.
+        Each block gets a synthetic unique ID.
+        """
+        blocks = []
+        xpath = f"./atom:content/espi:{self._type_tag}/espi:IntervalBlock"
+        
+        for index, block_elem in enumerate(self._elem.findall(xpath, _NAMESPACE_MAP)):
+            try:
+                # Generate synthetic unique ID for this block
+                entry_id = self.find_self_href()
+                block_id = f"{entry_id}-block-{index}"
+                
+                # Parse interval block properties directly from the element
+                start = _parse_child_text(
+                    block_elem, "./espi:interval/espi:start", _to_utc_datetime
+                )
+                duration = _parse_child_text(
+                    block_elem, "./espi:interval/espi:duration", _to_timedelta
+                )
+                
+                # Parse all interval readings within this block
+                interval_readings = []
+                for reading_elem in block_elem.findall("./espi:IntervalReading", _NAMESPACE_MAP):
+                    try:
+                        reading = model.IntervalReading(
+                            reading_type=reading_type,
+                            cost=_parse_optional_child_text(
+                                reading_elem, "./espi:cost", int, 0
+                            ),
+                            start=_parse_child_text(
+                                reading_elem, "./espi:timePeriod/espi:start", _to_utc_datetime
+                            ),
+                            duration=_parse_child_text(
+                                reading_elem, "./espi:timePeriod/espi:duration", _to_timedelta
+                            ),
+                            value=_parse_child_text(reading_elem, "./espi:value", int),
+                        )
+                        interval_readings.append(reading)
+                    except ValueError as ex:
+                        raise EspiXmlParseError(
+                            f"Failed to parse IntervalReading in {entry_id}: {ex}"
+                        ) from ex
+                
+                block = model.IntervalBlock(
+                    id=block_id,
+                    reading_type=reading_type,
+                    start=start,
+                    duration=duration,
+                    interval_readings=interval_readings,
+                )
+                blocks.append(block)
+            except (ValueError, EspiXmlParseError) as ex:
+                raise EspiXmlParseError(
+                    f"Failed to parse IntervalBlock {index} in entry:\n{_pretty_print(self._elem)}"
+                ) from ex
+        
+        return blocks
+
     def to_reading_type(self) -> model.ReadingType:
         """Parse this entry as a ReadingType."""
         return model.ReadingType(
@@ -512,7 +645,8 @@ class EspiEntry:
                                 interval_length = rt_entry.parse_child_text("espi:intervalLength", int)
                                 
                                 # For electricity: include sub-daily consumption (< 86400)
-                                # For gas: include daily consumption (== 86400)
+                                # For gas: include daily consumption (use tolerance for ±1 day)
+                                # Use tolerance to allow for variable-length monthly intervals
                                 if (
                                     sensor_device_class == sensor.SensorDeviceClass.ENERGY
                                     and flow_direction == 1
@@ -520,7 +654,11 @@ class EspiEntry:
                                 ) or (
                                     sensor_device_class == sensor.SensorDeviceClass.GAS
                                     and flow_direction == 1
-                                    and interval_length == 86400
+                                    and _intervals_match(
+                                        datetime.timedelta(seconds=interval_length),
+                                        86400,
+                                        tolerance_seconds=86400,
+                                    )
                                 ):
                                     logger.info(
                                         "Including MeterReading %s (flowDirection=%d, intervalLength=%d)",
