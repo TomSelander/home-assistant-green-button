@@ -18,6 +18,7 @@ T = TypeVar("T")
 _NAMESPACE_MAP: Final = {
     "atom": "http://www.w3.org/2005/Atom",
     "espi": "http://naesb.org/espi",
+    "ns": "http://naesb.org/espi",
 }
 
 
