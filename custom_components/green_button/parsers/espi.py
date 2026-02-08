@@ -189,15 +189,6 @@ class GreenButtonFeed:
                 interval_length = rt_entry.parse_child_text("espi:intervalLength", int)
 
                 if flow_direction == 1:  # Energy consumed
-                    # Skip daily summaries (intervalLength >= 86400 seconds = 24 hours)
-                    if interval_length >= 86400:
-                        logger.info(
-                            "Skipping daily summary ReadingType: %s (intervalLength=%d seconds)",
-                            rt_href,
-                            interval_length,
-                        )
-                        continue
-
                     reading_type = rt_entry.to_reading_type()
                     consumed_energy_reading_types.append((rt_entry, reading_type))
                     logger.info(
