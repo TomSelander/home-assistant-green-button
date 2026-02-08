@@ -13,6 +13,8 @@ from homeassistant.const import UnitOfEnergy
 
 from .. import model
 
+logger = logging.getLogger(__name__)
+
 T = TypeVar("T")
 
 _NAMESPACE_MAP: Final = {
@@ -148,10 +150,19 @@ class GreenButtonFeed:
     def to_usage_points(self) -> list[model.UsagePoint]:
         """Parse the feed into UsagePoints."""
         out = []
-        for usage_point in self.find_entries("UsagePoint"):
-            out.append(usage_point.to_usage_point())
+        usage_point_entries = self.find_entries("UsagePoint")
+        logger.info("Found %d UsagePoint entries", len(usage_point_entries))
+        
+        for usage_point in usage_point_entries:
+            try:
+                up = usage_point.to_usage_point()
+                out.append(up)
+                logger.info("Successfully parsed UsagePoint: %s", up.id)
+            except Exception as ex:
+                logger.error("Failed to parse UsagePoint: %s", ex, exc_info=True)
 
         if not out:
+            logger.info("No explicit UsagePoint entries found, creating default usage point")
             # No explicit UsagePoint entries - create default usage point
             # and associate only energy consumed meter readings (flowDirection=1)
             out = [self._create_default_usage_point_with_consumed_energy()]
@@ -474,8 +485,8 @@ class EspiEntry:
 
     def to_usage_point(self) -> model.UsagePoint:
         """Parse this entry as a UsagePoint."""
-        logger = logging.getLogger(__name__)
         self_href = self.find_self_href()
+        logger.info("Parsing UsagePoint: %s", self_href)
         sensor_device_class = self.parse_child_text(
             "espi:ServiceCategory/espi:kind",
             _SERVICE_KIND.__getitem__,
@@ -643,8 +654,7 @@ class EspiEntry:
 
 def parse_xml(value: str) -> list[model.UsagePoint]:
     """Parse an ESPI atom feed XML string."""
-    logger = logging.getLogger(__name__)
-
+    logger.info("Starting XML parsing")
     try:
         root = defusedET.fromstring(value)
     except ET.ParseError as ex:
