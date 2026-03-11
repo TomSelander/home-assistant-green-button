@@ -67,47 +67,55 @@ class GreenButtonCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return {"usage_points": usage_points or []}
 
     async def _async_update_eversource(self) -> dict[str, Any]:
-        """Fetch data from Eversource via web scraping."""
-        from .parsers.eversource_scraper import (
-            EversourceClient,
-            EversourceScraperError,
+        """Fetch data from Eversource via browser automation (Playwright)."""
+        from playwright.async_api import async_playwright
+
+        from .parsers.eversource_playwright import (
+            EversourcePlaywrightClient,
+            EversourcePlaywrightError,
             parse_usage_table,
             to_usage_points,
         )
 
-        client = EversourceClient(
-            username=self._eversource_username,
-            password=self._eversource_password,
-        )
-        try:
-            _LOGGER.info("Eversource polling: attempting login")
-            login_ok = await client.async_login()
-            if not login_ok:
+        # Launch browser for this poll cycle
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+
+            client = EversourcePlaywrightClient(
+                username=self._eversource_username,
+                password=self._eversource_password,
+                browser=browser,
+            )
+            try:
+                _LOGGER.info("Eversource polling: attempting login")
+                login_ok = await client.async_login()
+                if not login_ok:
+                    raise UpdateFailed(
+                        "Eversource login failed. Credentials may have changed."
+                    )
+
+                _LOGGER.info("Eversource polling: fetching usage history")
+                html = await client.async_get_full_usage_history()
+                rows = parse_usage_table(html)
+                _LOGGER.info("Eversource polling: parsed %d usage rows", len(rows))
+
+                usage_points = to_usage_points(rows)
+                self.usage_points = usage_points
+                return {"usage_points": usage_points}
+
+            except EversourcePlaywrightError as err:
                 raise UpdateFailed(
-                    "Eversource login failed. Credentials may have changed."
-                )
-
-            _LOGGER.info("Eversource polling: fetching usage history")
-            html = await client.async_get_full_usage_history()
-            rows = parse_usage_table(html)
-            _LOGGER.info("Eversource polling: parsed %d usage rows", len(rows))
-
-            usage_points = to_usage_points(rows)
-            self.usage_points = usage_points
-            return {"usage_points": usage_points}
-
-        except EversourceScraperError as err:
-            raise UpdateFailed(
-                f"Eversource data fetch failed: {err}"
-            ) from err
-        except UpdateFailed:
-            raise
-        except Exception as err:
-            raise UpdateFailed(
-                f"Unexpected error polling Eversource: {err}"
-            ) from err
-        finally:
-            await client.async_close()
+                    f"Eversource data fetch failed: {err}"
+                ) from err
+            except UpdateFailed:
+                raise
+            except Exception as err:
+                raise UpdateFailed(
+                    f"Unexpected error polling Eversource: {err}"
+                ) from err
+            finally:
+                # Browser closed automatically by async_playwright context manager
+                pass
 
     async def async_add_xml_data(self, xml_data: str, store_in_config: bool = True) -> None:
         """Add new Green Button XML data and update entities.
