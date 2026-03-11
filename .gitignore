@@ -3,3 +3,39 @@ pythonenv*
 .python-version
 .coverage
 **/.venv/
+
+# Logs and test artifacts
+logs/
+*.log
+*.html
+
+# Claude-generated documentation
+BROWSER_AUTOMATION_MIGRATION.md
+BROWSER_BLOCKING_FIX.md
+ERROR_HANDLING_IMPROVEMENTS.md
+EVERSOURCE_LOGIN_REDESIGN.md
+FORM_VS_PLAYWRIGHT.md
+HOME_ASSISTANT_INTEGRATION.md
+LOGIN_ERROR_ANALYSIS.md
+PLAYWRIGHT_INTEGRATION_COMPLETE.md
+PLAYWRIGHT_SETUP.md
+QUICK_START_CHECKLIST.md
+RATE_LIMITING_DEMO.md
+TEST_SUMMARY.md
+TESTING_RESULTS.md
+TROUBLESHOOTING.md
+
+# Eversource page dumps and debug files
+eversource_after_login.html
+usage_page_dump.html
+*_dump.html
+
+# Test scripts (keep only if needed for production testing)
+test_*.py
+
+# Spec files
+specs/
+
+# IDE
+.ruff_cache/
+.vscode/
