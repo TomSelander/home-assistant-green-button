@@ -434,3 +434,104 @@ def parse_usage_table(html: str) -> list[dict]:
 
     logger.info("Parsed %d usage history rows", len(rows))
     return rows
+
+
+def to_usage_points(scraped_data: list[dict]) -> list[Any]:
+    """Convert scraped Eversource usage data to Home Assistant model objects.
+
+    Creates a single UsagePoint containing a single MeterReading with
+    IntervalBlocks derived from each row of scraped data.
+
+    Args:
+        scraped_data: List of dicts from parse_usage_table().
+
+    Returns:
+        List containing a single UsagePoint with the scraped data.
+    """
+    from . import model
+    from homeassistant.components import sensor  # type: ignore[import-untyped]
+
+    if not scraped_data:
+        logger.warning("No scraped data to convert")
+        return []
+
+    interval_blocks: list[Any] = []
+
+    for idx, row in enumerate(scraped_data):
+        read_date: datetime.date = row["read_date"]
+        num_days: int = row.get("num_days", 0) or 0
+        usage_kwh: float = row.get("usage_kwh", 0.0) or 0.0
+        total_charge: float = row.get("total_charge", 0.0) or 0.0
+
+        if num_days <= 0:
+            logger.warning(
+                "Skipping row %d: invalid num_days=%d", idx, num_days
+            )
+            continue
+
+        # Calculate billing period start from read_date and num_days
+        period_duration = datetime.timedelta(days=num_days)
+        # Convert date to datetime at midnight
+        read_datetime = datetime.datetime.combine(read_date, datetime.time.min)
+        period_start = read_datetime - period_duration
+
+        # Determine interval length in seconds for this billing period
+        interval_length = num_days * 86400
+
+        # Create a ReadingType for this specific interval
+        reading_type = model.ReadingType(
+            id=f"eversource_reading_type_{idx}",
+            commodity=0,  # Electricity
+            currency="USD",
+            power_of_ten_multiplier=0,
+            unit_of_measurement="Wh",
+            interval_length=interval_length,
+        )
+
+        # Convert kWh to Wh for value, dollars to cents for cost
+        value_wh = int(usage_kwh * 1000)
+        cost_cents = int(total_charge * 100)
+
+        interval_reading = model.IntervalReading(
+            reading_type=reading_type,
+            cost=cost_cents,
+            start=period_start,
+            duration=period_duration,
+            value=value_wh,
+        )
+
+        interval_block = model.IntervalBlock(
+            id=f"eversource_block_{idx}",
+            reading_type=reading_type,
+            start=period_start,
+            duration=period_duration,
+            interval_readings=[interval_reading],
+        )
+
+        interval_blocks.append(interval_block)
+
+    if not interval_blocks:
+        logger.warning("No valid interval blocks created from scraped data")
+        return []
+
+    # Use the reading type from the first block for the meter reading
+    primary_reading_type = interval_blocks[0].reading_type
+
+    meter_reading = model.MeterReading(
+        id="eversource_meter",
+        reading_type=primary_reading_type,
+        interval_blocks=interval_blocks,
+    )
+
+    usage_point = model.UsagePoint(
+        id="eversource_usage_point",
+        sensor_device_class=sensor.SensorDeviceClass.ENERGY,
+        meter_readings=[meter_reading],
+    )
+
+    logger.info(
+        "Created UsagePoint with %d interval blocks from scraped data",
+        len(interval_blocks),
+    )
+
+    return [usage_point]
