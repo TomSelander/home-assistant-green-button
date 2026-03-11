@@ -243,7 +243,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=const.DOMAIN):
         Returns:
             Empty dict if validation succeeded, or dict with error keys.
         """
-        from playwright.async_api import async_playwright
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            _LOGGER.error(
+                "Playwright is not installed. On Home Assistant OS with Raspberry Pi, "
+                "install it in the Terminal add-on: pip install playwright && playwright install chromium"
+            )
+            return {"base": "eversource_connection_error"}
 
         from .parsers.eversource_playwright import (
             EversourcePlaywrightClient,

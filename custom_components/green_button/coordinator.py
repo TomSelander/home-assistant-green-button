@@ -68,7 +68,13 @@ class GreenButtonCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_update_eversource(self) -> dict[str, Any]:
         """Fetch data from Eversource via browser automation (Playwright)."""
-        from playwright.async_api import async_playwright
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError as err:
+            raise UpdateFailed(
+                "Playwright is not installed. On Home Assistant OS with Raspberry Pi, "
+                "install it in the Terminal add-on: pip install playwright && playwright install chromium"
+            ) from err
 
         from .parsers.eversource_playwright import (
             EversourcePlaywrightClient,
