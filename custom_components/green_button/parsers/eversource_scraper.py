@@ -58,6 +58,8 @@ _MAX_PAGINATION_PAGES = 50
 _PAGINATION_REQUEST_DELAY_SECONDS = 1.0
 
 # Common headers to mimic a real browser session
+# Real browsers send many more headers; we include the most important ones
+# to avoid being blocked by anti-bot measures
 _DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -65,7 +67,13 @@ _DEFAULT_HEADERS = {
         "Chrome/120.0.0.0 Safari/537.36"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Language": "en-US,en;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
 }
 
 # Transient errors that warrant a retry
@@ -233,42 +241,118 @@ class EversourceClient:
             payload[username_field or "Username"] = self._username
             payload[password_field or "Password"] = self._password
 
+            logger.debug(
+                "Built login payload with fields: %s",
+                [k for k in payload.keys() if k not in ("Password", "password")]
+            )
+
             # Step 4: POST the login form (with retry)
+            # Add Referer header to make it look like the POST came from the login page
+            post_headers = {"Referer": EVERSOURCE_LOGIN_URL}
             resp = await _request_with_retry(
                 self._session,
                 "POST",
                 EVERSOURCE_LOGIN_URL,
                 data=payload,
+                headers=post_headers,
                 allow_redirects=True,
                 timeout=aiohttp.ClientTimeout(total=30),
             )
             async with resp:
                 response_text = await resp.text()
+                final_url = str(resp.url).lower()
+
+                logger.debug(
+                    "Login POST response: status=%d, final_url=%s, content_len=%d",
+                    resp.status,
+                    final_url,
+                    len(response_text),
+                )
+
+                # Handle server errors
+                if resp.status >= 500:
+                    logger.error(
+                        "Eversource server error (status=%d). This may be a temporary outage, "
+                        "or you may be blocked by anti-bot measures. Try again in a few minutes.",
+                        resp.status,
+                    )
+                    return False
+
+                # Handle rate limiting / blocking (429, 403)
+                if resp.status == 429:
+                    logger.error(
+                        "Eversource rate limited (HTTP 429). Too many login attempts. "
+                        "Wait several hours before trying again."
+                    )
+                    return False
+
+                if resp.status == 403:
+                    logger.error(
+                        "Eversource forbidden (HTTP 403). You may be blocked by anti-bot measures. "
+                        "Try again later, or contact Eversource support."
+                    )
+                    return False
 
                 # Check for login success indicators
                 if resp.status == 200 and "sign out" in response_text.lower():
-                    logger.info("Eversource login succeeded")
+                    logger.info("Eversource login succeeded (found 'sign out' text)")
                     self._logged_in = True
                     return True
 
-                if resp.status == 200 and "dashboard" in str(resp.url).lower():
+                if resp.status == 200 and "dashboard" in final_url:
                     logger.info("Eversource login succeeded (redirected to dashboard)")
                     self._logged_in = True
                     return True
 
                 # If we followed a redirect chain and ended up on a non-login page
-                if resp.status == 200 and "login" not in str(resp.url).lower():
+                if resp.status == 200 and "login" not in final_url:
                     logger.info(
-                        "Eversource login likely succeeded (redirected away from login)"
+                        "Eversource login likely succeeded (redirected away from login page)"
                     )
                     self._logged_in = True
                     return True
 
-                logger.error(
-                    "Eversource login failed, final URL=%s, status=%d",
-                    resp.url,
-                    resp.status,
-                )
+                # Check for login failure indicators
+                if "invalid" in response_text.lower() or "error" in response_text.lower():
+                    logger.warning("Login response contains error/invalid text - credentials may be wrong")
+                    return False
+
+                # Handle redirect to login (credentials failed)
+                if "login" in final_url:
+                    logger.warning(
+                        "Still on login page after POST - credentials likely invalid. "
+                        "status=%d",
+                        resp.status,
+                    )
+                    return False
+
+                # Check for anti-bot or blocking indicators
+                blocking_indicators = [
+                    "cloudflare",
+                    "challenge",
+                    "bot",
+                    "verify",
+                    "javascript",
+                    "blocked",
+                ]
+                is_blocked = any(indicator in response_text.lower() for indicator in blocking_indicators)
+
+                if is_blocked or resp.status in (401, 403, 429):
+                    logger.error(
+                        "Eversource login may be blocked by anti-bot measures. "
+                        "Try again later, or access eversource.com in your browser to verify. "
+                        "Status=%d, url=%s",
+                        resp.status,
+                        final_url,
+                    )
+                else:
+                    logger.error(
+                        "Eversource login validation uncertain: status=%d, url=%s. "
+                        "Credentials may be invalid, account may have 2FA enabled, "
+                        "or Eversource website structure may have changed.",
+                        resp.status,
+                        final_url,
+                    )
                 return False
 
         except aiohttp.ClientError as err:
