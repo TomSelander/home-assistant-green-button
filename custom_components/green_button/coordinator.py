@@ -67,63 +67,55 @@ class GreenButtonCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return {"usage_points": usage_points or []}
 
     async def _async_update_eversource(self) -> dict[str, Any]:
-        """Fetch data from Eversource via HTTP requests."""
-        import aiohttp
+        """Fetch data from Eversource via browser automation (Playwright)."""
+        from playwright.async_api import async_playwright
 
-        from .parsers.eversource_http import (
-            EversourceHTTPClient,
-            EversourceHTTPError,
+        from .parsers.eversource_playwright import (
+            EversourcePlaywrightClient,
+            EversourcePlaywrightError,
             parse_usage_table,
             to_usage_points,
         )
 
-        session = None
-        try:
-            # Create HTTP session for this poll cycle
-            _LOGGER.info("Eversource polling: creating HTTP session")
-            session = aiohttp.ClientSession()
+        # Launch browser for this poll cycle
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
 
-            client = EversourceHTTPClient(
+            client = EversourcePlaywrightClient(
                 username=self._eversource_username,
                 password=self._eversource_password,
-                session=session,
+                browser=browser,
             )
+            try:
+                _LOGGER.info("Eversource polling: attempting login")
+                login_ok = await client.async_login()
+                if not login_ok:
+                    raise UpdateFailed(
+                        "Eversource login failed. Credentials may have changed."
+                    )
 
-            _LOGGER.info("Eversource polling: attempting login")
-            login_ok = await client.async_login()
-            if not login_ok:
+                _LOGGER.info("Eversource polling: fetching usage history")
+                html = await client.async_get_full_usage_history()
+                rows = parse_usage_table(html)
+                _LOGGER.info("Eversource polling: parsed %d usage rows", len(rows))
+
+                usage_points = to_usage_points(rows)
+                self.usage_points = usage_points
+                return {"usage_points": usage_points}
+
+            except EversourcePlaywrightError as err:
                 raise UpdateFailed(
-                    "Eversource login failed. Credentials may have changed or "
-                    "Eversource has switched to JavaScript-based authentication."
-                )
-
-            _LOGGER.info("Eversource polling: fetching usage history")
-            html = await client.async_get_full_usage_history()
-            rows = parse_usage_table(html)
-            _LOGGER.info("Eversource polling: parsed %d usage rows", len(rows))
-
-            usage_points = to_usage_points(rows)
-            self.usage_points = usage_points
-            return {"usage_points": usage_points}
-
-        except EversourceHTTPError as err:
-            raise UpdateFailed(
-                f"Eversource data fetch failed: {err}"
-            ) from err
-        except UpdateFailed:
-            raise
-        except Exception as err:
-            raise UpdateFailed(
-                f"Unexpected error polling Eversource: {err}"
-            ) from err
-        finally:
-            # Close session
-            if session:
-                try:
-                    await session.close()
-                    _LOGGER.debug("Closed HTTP session")
-                except Exception as err:
-                    _LOGGER.debug("Error closing session: %s", err)
+                    f"Eversource data fetch failed: {err}"
+                ) from err
+            except UpdateFailed:
+                raise
+            except Exception as err:
+                raise UpdateFailed(
+                    f"Unexpected error polling Eversource: {err}"
+                ) from err
+            finally:
+                # Browser closed automatically by async_playwright context manager
+                pass
 
     async def async_add_xml_data(self, xml_data: str, store_in_config: bool = True) -> None:
         """Add new Green Button XML data and update entities.
