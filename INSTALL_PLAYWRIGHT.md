@@ -2,45 +2,43 @@
 
 The Green Button integration uses Playwright to handle Eversource's JavaScript-based login. If you get an error about Playwright not being installed, follow these steps.
 
-## Home Assistant OS (Raspberry Pi)
+## ⚠️ Home Assistant OS (Raspberry Pi) - NOT SUPPORTED
 
-### Method 1: Terminal Add-on (Recommended)
+**Playwright cannot be installed on Home Assistant OS running on Raspberry Pi** due to ARM64 musl libc incompatibility. This is a fundamental limitation:
 
-1. **Open Home Assistant Terminal add-on**
-2. **Run one of these commands:**
+- Playwright wheels are only available for glibc-based systems (x86, x64, ARM64 Debian/Ubuntu)
+- Raspberry Pi Home Assistant OS uses Alpine Linux with musl libc
+- No amount of `pip install` tweaking will resolve this
 
-```bash
-# Try standard pip first
-pip install playwright && playwright install chromium
+**This limitation applies to all Raspberry Pi Home Assistant OS installations.**
 
-# Or use python module syntax
-python -m pip install playwright && python -m pip install playwright install chromium
+### ✅ Solutions:
 
-# Or with python3
-python3 -m pip install playwright && python3 -m pip install playwright install chromium
-```
+#### Option 1: Switch to Home Assistant Container (Docker) - RECOMMENDED
 
-3. **Restart Home Assistant** (Settings > System > Restart Home Assistant)
-4. **Try adding the integration again** (Settings > Devices & Services > Create Integration > Green Button)
+1. Backup your Home Assistant configuration
+2. Switch to [Home Assistant Container](https://www.home-assistant.io/installation/linux#docker-compose) installation (Docker on your Pi)
+3. Docker provides glibc, so Playwright will install normally:
+   ```bash
+   pip install playwright && playwright install chromium
+   ```
+4. Restore your configuration
 
-### Method 2: Automated Script
+Home Assistant Container is lighter weight than OS and gives you full system access.
 
-Run the included installation script:
+#### Option 2: Run Home Assistant on a Different Device
 
-```bash
-# On Linux/Raspberry Pi
-bash /config/custom_components/green_button/install_playwright.sh
+- Install Home Assistant OS or Home Assistant (generic Linux) on any x86/x64 or ARM64 Debian/Ubuntu system
+- Playwright works perfectly on these architectures
+- Examples: old laptop, desktop PC, cloud VPS, or x86 NAS
 
-# Or manually copy the script into Terminal add-on and run it
-```
+#### Option 3: Use Non-Raspberry Pi Home Assistant
 
-### Method 3: Home Assistant Container (Docker)
-
-If pip is restricted in Home Assistant OS, consider using Home Assistant Container instead:
-
-1. Switch to [Home Assistant Container](https://www.home-assistant.io/installation/linux#docker-compose) installation
-2. You'll have full access to pip and system commands
-3. Run: `pip install playwright && playwright install chromium`
+If you're building a new system, consider:
+- x86-based single-board computer (Intel NUC, etc.)
+- Traditional laptop/desktop running Home Assistant
+- Cloud-hosted Home Assistant
+- x86 NAS running Home Assistant
 
 ## Home Assistant Supervised / Virtual Environment
 

@@ -16,6 +16,19 @@ The Green Button data needs to be in the ESPI XML Schema Definition, contained i
 
 This custom component has been developed to handle the Green Button data available from Hydro Ottawa and Enbridge Gas. It may or may not work with other sources of Green Button data.
 
+## ⚠️ System Requirements
+
+This integration requires **Playwright** for JavaScript-based login handling with Eversource.
+
+**Playwright is NOT compatible with Raspberry Pi Home Assistant OS** due to musl libc incompatibility. See [INSTALL_PLAYWRIGHT.md](INSTALL_PLAYWRIGHT.md) for details and solutions.
+
+Works on:
+- ✅ Home Assistant (generic Linux on x86/x64)
+- ✅ Home Assistant Container (Docker on any architecture)
+- ✅ Home Assistant Supervised
+- ✅ Home Assistant on macOS / x86 NAS
+- ❌ Home Assistant OS on Raspberry Pi (ARM64 musl)
+
 ## Installation (HACS not verified yet)
 
 1. Copy the green_button folder under custom_components into your Home Assistant custom_components folder
