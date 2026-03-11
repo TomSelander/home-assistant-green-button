@@ -67,33 +67,34 @@ class GreenButtonCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return {"usage_points": usage_points or []}
 
     async def _async_update_eversource(self) -> dict[str, Any]:
-        """Fetch data from Eversource via browser automation (pyppeteer)."""
-        import pyppeteer
+        """Fetch data from Eversource via HTTP requests."""
+        import aiohttp
 
-        from .parsers.eversource_playwright import (
-            EversourcePlaywrightClient,
-            EversourcePlaywrightError,
+        from .parsers.eversource_http import (
+            EversourceHTTPClient,
+            EversourceHTTPError,
             parse_usage_table,
             to_usage_points,
         )
 
-        browser = None
+        session = None
         try:
-            # Launch browser for this poll cycle
-            _LOGGER.info("Eversource polling: launching browser")
-            browser = await pyppeteer.launch(headless=True)
+            # Create HTTP session for this poll cycle
+            _LOGGER.info("Eversource polling: creating HTTP session")
+            session = aiohttp.ClientSession()
 
-            client = EversourcePlaywrightClient(
+            client = EversourceHTTPClient(
                 username=self._eversource_username,
                 password=self._eversource_password,
-                browser=browser,
+                session=session,
             )
 
             _LOGGER.info("Eversource polling: attempting login")
             login_ok = await client.async_login()
             if not login_ok:
                 raise UpdateFailed(
-                    "Eversource login failed. Credentials may have changed."
+                    "Eversource login failed. Credentials may have changed or "
+                    "Eversource has switched to JavaScript-based authentication."
                 )
 
             _LOGGER.info("Eversource polling: fetching usage history")
@@ -101,13 +102,11 @@ class GreenButtonCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             rows = parse_usage_table(html)
             _LOGGER.info("Eversource polling: parsed %d usage rows", len(rows))
 
-            await client.async_close()
-
             usage_points = to_usage_points(rows)
             self.usage_points = usage_points
             return {"usage_points": usage_points}
 
-        except EversourcePlaywrightError as err:
+        except EversourceHTTPError as err:
             raise UpdateFailed(
                 f"Eversource data fetch failed: {err}"
             ) from err
@@ -118,13 +117,13 @@ class GreenButtonCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 f"Unexpected error polling Eversource: {err}"
             ) from err
         finally:
-            # Close browser
-            if browser:
+            # Close session
+            if session:
                 try:
-                    await browser.close()
-                    _LOGGER.debug("Closed pyppeteer browser")
+                    await session.close()
+                    _LOGGER.debug("Closed HTTP session")
                 except Exception as err:
-                    _LOGGER.debug("Error closing browser: %s", err)
+                    _LOGGER.debug("Error closing session: %s", err)
 
     async def async_add_xml_data(self, xml_data: str, store_in_config: bool = True) -> None:
         """Add new Green Button XML data and update entities.

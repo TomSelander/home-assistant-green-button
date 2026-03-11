@@ -238,27 +238,27 @@ class ConfigFlow(config_entries.ConfigFlow, domain=const.DOMAIN):
     async def _validate_eversource_credentials(
         self, username: str, password: str
     ) -> dict[str, str]:
-        """Validate Eversource credentials by attempting login and data fetch using pyppeteer.
+        """Validate Eversource credentials by attempting login and data fetch via HTTP.
 
         Returns:
             Empty dict if validation succeeded, or dict with error keys.
         """
-        import pyppeteer
+        import aiohttp
 
-        from .parsers.eversource_playwright import (
-            EversourcePlaywrightClient,
-            EversourcePlaywrightError,
+        from .parsers.eversource_http import (
+            EversourceHTTPClient,
+            EversourceHTTPError,
             parse_usage_table,
         )
 
-        browser = None
+        session = None
         try:
-            # Launch browser for validation
-            _LOGGER.debug("Launching browser for credential validation")
-            browser = await pyppeteer.launch(headless=True)
+            # Create HTTP session for validation
+            _LOGGER.debug("Creating HTTP session for credential validation")
+            session = aiohttp.ClientSession()
 
-            client = EversourcePlaywrightClient(
-                username=username, password=password, browser=browser
+            client = EversourceHTTPClient(
+                username=username, password=password, session=session
             )
 
             login_ok = await client.async_login()
@@ -278,14 +278,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=const.DOMAIN):
                 _LOGGER.warning("Eversource login succeeded but no usage data returned")
                 return {"base": "eversource_connection_error"}
 
-            await client.async_close()
-
             _LOGGER.info(
                 "Eversource credential validation succeeded, found %d usage rows",
                 len(rows),
             )
             return {}
-        except EversourcePlaywrightError as err:
+        except EversourceHTTPError as err:
             _LOGGER.exception("Eversource data fetch failed during validation: %s", err)
             return {"base": "eversource_connection_error"}
         except Exception as err:
@@ -294,13 +292,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=const.DOMAIN):
             )
             return {"base": "eversource_connection_error"}
         finally:
-            # Close browser
-            if browser:
+            # Close session
+            if session:
                 try:
-                    await browser.close()
-                    _LOGGER.debug("Closed validation browser")
+                    await session.close()
+                    _LOGGER.debug("Closed validation session")
                 except Exception as err:
-                    _LOGGER.debug("Error closing validation browser: %s", err)
+                    _LOGGER.debug("Error closing validation session: %s", err)
 
 
 class OptionsFlowHandler(config_entries.OptionsFlow):
