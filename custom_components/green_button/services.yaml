@@ -49,6 +49,13 @@ log_statistics:
       selector:
         datetime:
 
+refresh_eversource:
+  name: Refresh Eversource Data
+  description: >-
+    Trigger an immediate refresh of all Eversource usage data.
+    This performs a fresh login and fetches the latest usage history
+    for every configured Eversource entry.
+
 reset:
   name: Reset
   description: Reset

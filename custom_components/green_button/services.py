@@ -5,14 +5,14 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-import voluptuous as vol
+import voluptuous as vol  # type: ignore[import-untyped]
 
-from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.helpers import config_validation as cv
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.core import HomeAssistant, ServiceCall  # type: ignore[import-untyped]
+from homeassistant.helpers import config_validation as cv  # type: ignore[import-untyped]
+from homeassistant.exceptions import HomeAssistantError  # type: ignore[import-untyped]
 
 from . import statistics
-from .const import DOMAIN
+from .const import CONF_INPUT_TYPE, DOMAIN, SERVICE_REFRESH_EVERSOURCE
 from .coordinator import GreenButtonCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -33,6 +33,8 @@ DELETE_STATISTICS_SCHEMA = vol.Schema(
     }
 )
 
+REFRESH_EVERSOURCE_SCHEMA = vol.Schema({})  # No parameters needed
+
 
 def _read_file_sync(file_path: Path) -> str:
     """Read file content synchronously."""
@@ -46,19 +48,19 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         """Handle the import_espi_xml service call."""
         xml_path = call.data.get("xml_file_path", "").strip()
         xml_content = call.data.get("xml", "").strip()
-        
+
         # Validate that at least one is provided
         if not xml_path and not xml_content:
             msg = "No XML data provided. Please provide either xml_file_path or xml content."
             _LOGGER.error(msg)
             raise HomeAssistantError(msg)
-        
+
         # Validate that both are not provided
         if xml_path and xml_content:
             msg = "Both xml_file_path and xml content provided. Please provide only one."
             _LOGGER.error(msg)
             raise HomeAssistantError(msg)
-        
+
         # If file path is provided, read the file
         if xml_path:
             # Debug logging
@@ -156,6 +158,55 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             _LOGGER.error("Failed to delete statistics for %s: %s", statistic_id, err)
             raise
 
+    async def refresh_eversource_service(call: ServiceCall) -> None:
+        """Handle the refresh_eversource service call.
+
+        Iterates through all configured Green Button entries and triggers
+        an immediate coordinator refresh for each one whose input_type is
+        "eversource".  This allows the user to manually pull fresh usage
+        data without waiting for the next scheduled poll.
+
+        The coordinator's ``_async_update_eversource`` method creates a
+        new ``EversourceClient`` with a fresh login on every refresh, so
+        expired sessions are handled automatically.
+        """
+        _LOGGER.info("Manual Eversource refresh requested via service call")
+
+        entries = list(hass.config_entries.async_entries(DOMAIN))
+        if not entries:
+            _LOGGER.warning("No Green Button integrations found for refresh")
+            return
+
+        refreshed = 0
+        for entry in entries:
+            # Only refresh eversource-type entries
+            if entry.data.get(CONF_INPUT_TYPE) != "eversource":
+                continue
+
+            coordinator_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            coordinator: GreenButtonCoordinator | None = coordinator_data.get(
+                "coordinator"
+            )
+            if not coordinator:
+                _LOGGER.warning(
+                    "No coordinator found for eversource entry %s", entry.entry_id
+                )
+                continue
+
+            _LOGGER.info(
+                "Triggering immediate refresh for eversource entry %s (%s)",
+                entry.entry_id,
+                entry.title,
+            )
+            await coordinator.async_refresh()
+            refreshed += 1
+
+        _LOGGER.info(
+            "Eversource refresh complete: %d entr%s refreshed",
+            refreshed,
+            "y" if refreshed == 1 else "ies",
+        )
+
     # Register services
     try:
         hass.services.async_register(
@@ -172,6 +223,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             schema=DELETE_STATISTICS_SCHEMA,
         )
 
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_REFRESH_EVERSOURCE,
+            refresh_eversource_service,
+            schema=REFRESH_EVERSOURCE_SCHEMA,
+        )
+
         _LOGGER.info("Green Button services registered successfully")
     except Exception as err:
         _LOGGER.error("Failed to register Green Button services: %s", err)
@@ -182,4 +240,5 @@ async def async_unload_services(hass: HomeAssistant) -> None:
     """Unload services for the Green Button integration."""
     hass.services.async_remove(DOMAIN, SERVICE_IMPORT_ESPI_XML)
     hass.services.async_remove(DOMAIN, SERVICE_DELETE_STATISTICS)
+    hass.services.async_remove(DOMAIN, SERVICE_REFRESH_EVERSOURCE)
     _LOGGER.info("Green Button services unloaded")

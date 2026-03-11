@@ -28,24 +28,23 @@ class ConfigFlow(config_entries.ConfigFlow, domain=const.DOMAIN):
         """Get the options flow for this handler."""
         return OptionsFlowHandler(config_entry)
 
-
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """Handle the initial step."""
         step_id = "user"
-        
+
         # Build a custom schema where XML field is optional
         if user_input is None:
             user_input_default = {
                 "name": "Home",
-                "input_type": "file",
+                const.CONF_INPUT_TYPE: "file",
                 "gas_cost_allocation": "pro_rate_daily",
                 "gas_usage_allocation": "daily_readings",
             }
         else:
             user_input_default = user_input
-            
+
         schema = vol.Schema(
             {
                 vol.Required(
@@ -53,11 +52,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=const.DOMAIN):
                     default=user_input_default.get("name"),
                 ): str,
                 vol.Required(
-                    "input_type",
-                    default=user_input_default.get("input_type", "file"),
+                    const.CONF_INPUT_TYPE,
+                    default=user_input_default.get(const.CONF_INPUT_TYPE, "file"),
                 ): selector.SelectSelector(
                     selector.SelectSelectorConfig(
-                        options=["file", "xml"],
+                        options=["file", "xml", "eversource"],
                         mode="list",
                     )
                 ),
@@ -70,6 +69,18 @@ class ConfigFlow(config_entries.ConfigFlow, domain=const.DOMAIN):
                     )
                 ),
                 vol.Optional("xml_file_path", default=""): str,
+                vol.Optional(
+                    const.CONF_EVERSOURCE_USERNAME,
+                    default=user_input_default.get(const.CONF_EVERSOURCE_USERNAME, ""),
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(type="text")
+                ),
+                vol.Optional(
+                    const.CONF_EVERSOURCE_PASSWORD,
+                    default=user_input_default.get(const.CONF_EVERSOURCE_PASSWORD, ""),
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(type="password")
+                ),
                 vol.Optional(
                     "gas_cost_allocation",
                     default=user_input_default.get("gas_cost_allocation", "pro_rate_daily"),
@@ -96,18 +107,28 @@ class ConfigFlow(config_entries.ConfigFlow, domain=const.DOMAIN):
                 ),
             }
         )
-        
+
         errors = {}
-        
+
         if user_input is not None:
-            input_type = user_input.get("input_type")
+            input_type = user_input.get(const.CONF_INPUT_TYPE)
             xml_path = user_input.get("xml_file_path", "").strip()
             xml_content = user_input.get("xml", "").strip()
-            
+
             # Validate selection
-            if input_type not in ("file", "xml"):
-                errors["input_type"] = "input_type_required"
+            if input_type not in ("file", "xml", "eversource"):
+                errors[const.CONF_INPUT_TYPE] = "input_type_required"
                 errors.setdefault("base", "input_type_required")
+            elif input_type == "eversource":
+                # Validate Eversource credentials
+                username = user_input.get(const.CONF_EVERSOURCE_USERNAME, "").strip()
+                password = user_input.get(const.CONF_EVERSOURCE_PASSWORD, "").strip()
+                if not username or not password:
+                    errors["base"] = "invalid_eversource_credentials"
+                else:
+                    errors = await self._validate_eversource_credentials(
+                        username, password
+                    )
             elif input_type == "file":
                 # Require a file path; ignore xml content if provided
                 if not xml_path:
@@ -148,6 +169,36 @@ class ConfigFlow(config_entries.ConfigFlow, domain=const.DOMAIN):
                 errors=errors,
             )
 
+        # Handle eversource mode: create entry directly without XML parsing
+        input_type = user_input.get(const.CONF_INPUT_TYPE)
+        if input_type == "eversource":
+            username = user_input[const.CONF_EVERSOURCE_USERNAME].strip()
+            unique_id = f"eversource_{username}"
+
+            if await self.async_set_unique_id(unique_id) is not None:
+                _LOGGER.info(
+                    "A ConfigEntry with the unique ID %r is already configured",
+                    unique_id,
+                )
+                return self.async_abort(reason="already_configured")
+
+            _LOGGER.info("Created eversource config with unique ID %r", unique_id)
+            config_data = {
+                "name": user_input.get("name", "Eversource"),
+                "usage_point_id": unique_id,
+                const.CONF_INPUT_TYPE: "eversource",
+                const.CONF_EVERSOURCE_USERNAME: username,
+                const.CONF_EVERSOURCE_PASSWORD: user_input[const.CONF_EVERSOURCE_PASSWORD],
+                "meter_reading_configs": [],
+                "gas_cost_allocation": user_input.get("gas_cost_allocation", "pro_rate_daily"),
+                "gas_usage_allocation": user_input.get("gas_usage_allocation", "daily_readings"),
+            }
+            return self.async_create_entry(
+                title=user_input.get("name", "Eversource"),
+                data=config_data,
+            )
+
+        # Existing XML/file mode
         try:
             config = configs.ComponentConfig.from_mapping(user_input)
         except configs.InvalidUserInputError as ex:
@@ -169,6 +220,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=const.DOMAIN):
         config_data = dict(config.to_mapping())
         # Store the XML content from user_input (which now has the file content if path was provided)
         config_data["xml"] = user_input.get("xml", "")
+        config_data[const.CONF_INPUT_TYPE] = input_type
         # Store gas cost allocation toggle
         config_data["gas_cost_allocation"] = user_input.get(
             "gas_cost_allocation", "pro_rate_daily"
@@ -182,6 +234,44 @@ class ConfigFlow(config_entries.ConfigFlow, domain=const.DOMAIN):
             title=config.name,
             data=config_data,
         )
+
+    async def _validate_eversource_credentials(
+        self, username: str, password: str
+    ) -> dict[str, str]:
+        """Validate Eversource credentials by attempting login and data fetch.
+
+        Returns:
+            Empty dict if validation succeeded, or dict with error keys.
+        """
+        from .parsers.eversource_scraper import EversourceClient, EversourceScraperError
+
+        client = EversourceClient(username=username, password=password)
+        try:
+            login_ok = await client.async_login()
+            if not login_ok:
+                return {"base": "invalid_eversource_credentials"}
+
+            # Verify we can fetch usage data
+            html = await client.async_fetch_usage_history()
+            from .parsers.eversource_scraper import parse_usage_table
+            rows = parse_usage_table(html)
+            if not rows:
+                _LOGGER.warning("Eversource login succeeded but no usage data returned")
+                return {"base": "eversource_connection_error"}
+
+            _LOGGER.info(
+                "Eversource credential validation succeeded, found %d usage rows",
+                len(rows),
+            )
+            return {}
+        except EversourceScraperError:
+            _LOGGER.exception("Eversource data fetch failed during validation")
+            return {"base": "eversource_connection_error"}
+        except Exception:
+            _LOGGER.exception("Unexpected error validating Eversource credentials")
+            return {"base": "eversource_connection_error"}
+        finally:
+            await client.async_close()
 
 
 class OptionsFlowHandler(config_entries.OptionsFlow):

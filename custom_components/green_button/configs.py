@@ -154,7 +154,22 @@ class ComponentConfig:
 
         The mapping should conform to the expected schema from
         `make_config_entry_step_schema`.
+
+        For eversource mode, returns a placeholder config with empty
+        meter_reading_configs. The coordinator will populate data on first fetch.
         """
+        input_type = user_input.get("input_type", "file")
+
+        if input_type == "eversource":
+            username = user_input.get("eversource_username", "")
+            unique_id = f"eversource_{username}"
+            return ComponentConfig(
+                name=user_input.get(_ComponentConfigField.NAME, "Eversource"),
+                unique_id=unique_id,
+                meter_reading_configs=[],
+                initial_usage_point=None,
+            )
+
         try:
             usage_points = espi.parse_xml(user_input[_ComponentConfigField.XML])
         except espi.EspiXmlParseError as ex:
@@ -192,6 +207,17 @@ class ComponentConfig:
         """
         unique_id = entry.unique_id
         assert unique_id is not None
+
+        input_type = entry.data.get("input_type", "file")
+
+        # Eversource mode: return placeholder config, coordinator fetches data
+        if input_type == "eversource":
+            return ComponentConfig(
+                name=entry.data.get(_ComponentConfigField.NAME, "Eversource"),
+                unique_id=entry.data.get(_ComponentConfigField.UNIQUE_ID, unique_id),
+                meter_reading_configs=[],
+                initial_usage_point=None,
+            )
 
         # Parse XML data if available to get initial_usage_point
         initial_usage_point = None

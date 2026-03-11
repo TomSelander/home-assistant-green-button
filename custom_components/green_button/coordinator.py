@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+from datetime import timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -11,32 +12,49 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from . import model
-from .const import DOMAIN
+from .const import CONF_INPUT_TYPE, CONF_EVERSOURCE_USERNAME, CONF_EVERSOURCE_PASSWORD
+from .const import DEFAULT_SCAN_INTERVAL_HOURS, DOMAIN
 from .parsers import espi
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class GreenButtonCoordinator(DataUpdateCoordinator[dict[str, Any]]):
-    """Coordinator to manage Green Button data updates (manual updates only, no polling)."""
+    """Coordinator to manage Green Button data updates."""
 
     def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry) -> None:
         """Initialize the Green Button coordinator."""
+        self._input_type = config_entry.data.get(CONF_INPUT_TYPE, "file")
+        self._eversource_username = config_entry.data.get(CONF_EVERSOURCE_USERNAME, "")
+        self._eversource_password = config_entry.data.get(CONF_EVERSOURCE_PASSWORD, "")
+
+        # Set polling interval for eversource mode, no polling for XML modes
+        update_interval: timedelta | None = None
+        if self._input_type == "eversource":
+            update_interval = timedelta(hours=DEFAULT_SCAN_INTERVAL_HOURS)
+            _LOGGER.info(
+                "Eversource mode: polling every %d hours",
+                DEFAULT_SCAN_INTERVAL_HOURS,
+            )
+
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
             config_entry=config_entry,
-            # No update_interval - manual updates only
+            update_interval=update_interval,
         )
         self.config_entry = config_entry
         self.usage_points: list[model.UsagePoint] = []
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch and parse the latest Green Button data."""
+        if self._input_type == "eversource":
+            return await self._async_update_eversource()
+
+        # Existing XML-based update logic
         try:
             usage_points = None
-            # Get XML data from config entry instead of file path
             xml_data = self.config_entry.data.get("xml")
             if xml_data:
                 usage_points = await self.hass.async_add_executor_job(
@@ -47,6 +65,49 @@ class GreenButtonCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             self.usage_points = usage_points or []
             return {"usage_points": usage_points or []}
+
+    async def _async_update_eversource(self) -> dict[str, Any]:
+        """Fetch data from Eversource via web scraping."""
+        from .parsers.eversource_scraper import (
+            EversourceClient,
+            EversourceScraperError,
+            parse_usage_table,
+            to_usage_points,
+        )
+
+        client = EversourceClient(
+            username=self._eversource_username,
+            password=self._eversource_password,
+        )
+        try:
+            _LOGGER.info("Eversource polling: attempting login")
+            login_ok = await client.async_login()
+            if not login_ok:
+                raise UpdateFailed(
+                    "Eversource login failed. Credentials may have changed."
+                )
+
+            _LOGGER.info("Eversource polling: fetching usage history")
+            html = await client.async_get_full_usage_history()
+            rows = parse_usage_table(html)
+            _LOGGER.info("Eversource polling: parsed %d usage rows", len(rows))
+
+            usage_points = to_usage_points(rows)
+            self.usage_points = usage_points
+            return {"usage_points": usage_points}
+
+        except EversourceScraperError as err:
+            raise UpdateFailed(
+                f"Eversource data fetch failed: {err}"
+            ) from err
+        except UpdateFailed:
+            raise
+        except Exception as err:
+            raise UpdateFailed(
+                f"Unexpected error polling Eversource: {err}"
+            ) from err
+        finally:
+            await client.async_close()
 
     async def async_add_xml_data(self, xml_data: str, store_in_config: bool = True) -> None:
         """Add new Green Button XML data and update entities.

@@ -4,6 +4,19 @@ from typing import Final
 DOMAIN: Final = "green_button"
 # INTEGRATION_SERVICE_DATA_KEY = "integration_service"
 
+# Input type configuration
+CONF_INPUT_TYPE: Final = "input_type"
+
+# Eversource configuration
+CONF_EVERSOURCE_USERNAME: Final = "eversource_username"
+CONF_EVERSOURCE_PASSWORD: Final = "eversource_password"
+EVERSOURCE_LOGIN_URL: Final = "https://www.eversource.com/security/account/login"
+EVERSOURCE_USAGE_URL: Final = "https://www.eversource.com/cg/customer/usagehistory"
+DEFAULT_SCAN_INTERVAL_HOURS: Final = 12
+
+# Service names
+SERVICE_REFRESH_EVERSOURCE: Final = "refresh_eversource"
+
 
 # class _CustomEntitiesParams:
 #     NAME: Final = "name"

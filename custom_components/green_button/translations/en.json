@@ -16,6 +16,8 @@
       "both_xml_provided": "Please provide either XML content or an XML file path, not both.",
       "file_not_found": "The specified XML file does not exist.",
       "file_read_error": "Failed to read the XML file.",
+      "invalid_eversource_credentials": "Invalid Eversource username or password.",
+      "eversource_connection_error": "Could not connect to Eversource. Please try again later.",
       "unknown": "Unexpected error"
     },
     "step": {
@@ -29,7 +31,9 @@
           "gas_cost_allocation": "Gas cost allocation",
           "gas_usage_allocation": "Gas usage allocation",
           "xml": "XML",
-          "xml_file_path": "XML File Path"
+          "xml_file_path": "XML File Path",
+          "eversource_username": "Eversource Username",
+          "eversource_password": "Eversource Password"
         },
         "data_description": {
           "xml_file_path": "Relative paths resolve against the Home Assistant config directory (e.g., /config).",
@@ -51,7 +55,8 @@
   "selector": {
     "input_type": {
       "file": "XML File",
-      "xml": "XML Content"
+      "xml": "XML Content",
+      "eversource": "Eversource Account"
     }
   },
   "errors": {
