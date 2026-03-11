@@ -1,6 +1,6 @@
-"""Eversource web scraper using Playwright for browser automation.
+"""Eversource web scraper using pyppeteer for browser automation.
 
-This module uses Playwright to control a real browser, allowing it to:
+This module uses pyppeteer (pure Python Puppeteer) to control a headless browser, allowing it to:
 - Execute JavaScript-based login forms (Okta OAuth)
 - Handle modern anti-bot detection
 - Extract usage history from dynamically loaded pages
@@ -24,7 +24,8 @@ from typing import TYPE_CHECKING, Any
 from bs4 import BeautifulSoup  # type: ignore[import-untyped]
 
 if TYPE_CHECKING:
-    from playwright.async_api import Browser, Page
+    from pyppeteer.browser import Browser
+    from pyppeteer.page import Page
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,7 @@ class EversourcePlaywrightClient:
         self._logged_in = False
 
     async def async_login(self) -> bool:
-        """Authenticate to Eversource using Playwright browser.
+        """Authenticate to Eversource using pyppeteer browser.
 
         Opens the login page, waits for it to load, enters credentials,
         and submits the login form. The browser handles all JavaScript
@@ -91,10 +92,12 @@ class EversourcePlaywrightClient:
 
         try:
             # Create a new page/context for this login session
-            self._page = await self._browser.new_page()
-
-            # Set a reasonable timeout for all operations
-            self._page.set_default_timeout(_PAGE_LOAD_TIMEOUT_MS)
+            pages = await self._browser.pages()
+            if pages:
+                self._page = pages[0]
+                await self._page.goto("about:blank")  # Clear page
+            else:
+                self._page = await self._browser.newPage()
 
             logger.debug("Created new browser page for login")
 
@@ -103,7 +106,7 @@ class EversourcePlaywrightClient:
             try:
                 await self._page.goto(
                     EVERSOURCE_LOGIN_URL,
-                    wait_until="domcontentloaded",
+                    waitUntil="domcontentloaded",
                     timeout=_PAGE_LOAD_TIMEOUT_MS,
                 )
             except Exception as e:
@@ -119,14 +122,13 @@ class EversourcePlaywrightClient:
                 "input[name='email']",
                 "input[id*='username']",
                 "input[id*='email']",
-                "input[placeholder*='email' i]",
-                "input[placeholder*='username' i]",
             ]
 
             username_field = None
             for selector in username_selectors:
                 try:
-                    if await self._page.query_selector(selector):
+                    element = await self._page.querySelector(selector)
+                    if element:
                         username_field = selector
                         logger.debug("Found username field: %s", selector)
                         break
@@ -142,7 +144,7 @@ class EversourcePlaywrightClient:
 
             # Enter username
             logger.debug("Entering username")
-            await self._page.fill(username_field, self._username)
+            await self._page.type(username_field, self._username)
 
             # Step 3: Find and fill password field
             password_selectors = [
@@ -154,7 +156,8 @@ class EversourcePlaywrightClient:
             password_field = None
             for selector in password_selectors:
                 try:
-                    if await self._page.query_selector(selector):
+                    element = await self._page.querySelector(selector)
+                    if element:
                         password_field = selector
                         logger.debug("Found password field: %s", selector)
                         break
@@ -170,23 +173,19 @@ class EversourcePlaywrightClient:
 
             # Enter password
             logger.debug("Entering password")
-            await self._page.fill(password_field, self._password)
+            await self._page.type(password_field, self._password)
 
             # Step 4: Find and click login button
             login_button_selectors = [
                 "button[type='submit']",
-                "button:has-text('Sign In')",
-                "button:has-text('Login')",
-                "button:has-text('Log In')",
                 "input[type='submit']",
-                "[role='button']:has-text('Sign In')",
-                "[role='button']:has-text('Login')",
             ]
 
             login_button = None
             for selector in login_button_selectors:
                 try:
-                    if await self._page.query_selector(selector):
+                    element = await self._page.querySelector(selector)
+                    if element:
                         login_button = selector
                         logger.debug("Found login button: %s", selector)
                         break
@@ -203,27 +202,20 @@ class EversourcePlaywrightClient:
             # Click login button
             logger.debug("Clicking login button")
             await self._page.click(login_button)
-            await self._page.wait_for_timeout(3000)  # Let form submission process
+            await asyncio.sleep(3)  # Let form submission process
 
-            # Step 5: Wait for login to complete
-            # The page will redirect after successful login, or stay on login page if failed
+            # Step 5: Wait for login to complete (poll for URL change)
             logger.debug("Waiting for login to complete (up to 60 seconds)")
-
-            try:
-                # Wait for navigation away from login page, or timeout
-                await self._page.wait_for_url(
-                    lambda url: "login" not in url.lower(),
-                    timeout=_LOGIN_TIMEOUT_MS,
-                )
-                logger.info(
-                    "Login succeeded - redirected to: %s",
-                    self._page.url,
-                )
-            except asyncio.TimeoutError:
-                logger.debug("Timeout waiting for redirect - checking current state")
+            start_time = asyncio.get_event_loop().time()
+            while asyncio.get_event_loop().time() - start_time < _LOGIN_TIMEOUT_MS / 1000:
+                current_url = self._page.url.lower()
+                if "login" not in current_url:
+                    logger.info("Login succeeded - redirected to: %s", self._page.url)
+                    break
+                await asyncio.sleep(1)
 
             # Step 6: Handle 2FA prompt if present
-            await self._page.wait_for_timeout(2000)  # Let page settle
+            await asyncio.sleep(2)  # Let page settle
             current_url = self._page.url.lower()
 
             if any(x in current_url for x in ["2fa", "2-fa", "verify", "challenge", "mfa"]):
@@ -232,15 +224,18 @@ class EversourcePlaywrightClient:
 
                 try:
                     # Try to find and click "Ask Me Again Later" button
-                    buttons = await self._page.query_selector_all("button")
+                    buttons = await self._page.querySelectorAll("button")
                     for btn in buttons:
-                        text = await btn.text_content()
-                        if text and "Ask Me Again Later" in text:
-                            logger.debug("Found 'Ask Me Again Later' button - clicking")
-                            await btn.click()
-                            await self._page.wait_for_timeout(2000)
-                            logger.debug("2FA skipped successfully")
-                            break
+                        try:
+                            text = await self._page.evaluate("btn => btn.textContent", btn)
+                            if text and "Ask Me Again Later" in text:
+                                logger.debug("Found 'Ask Me Again Later' button - clicking")
+                                await btn.click()
+                                await asyncio.sleep(2)
+                                logger.debug("2FA skipped successfully")
+                                break
+                        except Exception:
+                            continue
                 except Exception as err:
                     logger.warning("Error skipping 2FA: %s", err)
                     # Continue anyway - user may have 2FA disabled
@@ -288,7 +283,7 @@ class EversourcePlaywrightClient:
         try:
             await self._page.goto(
                 EVERSOURCE_USAGE_URL,
-                wait_until="domcontentloaded",
+                waitUntil="domcontentloaded",
                 timeout=_PAGE_LOAD_TIMEOUT_MS,
             )
 
@@ -296,7 +291,7 @@ class EversourcePlaywrightClient:
 
             # Wait for the usage table to appear with data
             try:
-                await self._page.wait_for_selector(
+                await self._page.waitForSelector(
                     "table#usageChartTable tbody tr",
                     timeout=_ELEMENT_TIMEOUT_MS
                 )
@@ -305,7 +300,7 @@ class EversourcePlaywrightClient:
                 logger.warning("Timeout waiting for table rows: %s (continuing anyway)", e)
 
             # Wait for page to settle
-            await self._page.wait_for_timeout(2000)
+            await asyncio.sleep(2)
 
             html = await self._page.content()
             logger.info("Fetched usage history page (%d characters)", len(html))
@@ -319,7 +314,7 @@ class EversourcePlaywrightClient:
     async def async_get_full_usage_history(self) -> str:
         """Fetch usage history with full pagination handling.
 
-        Uses Playwright to interact with "Show More" buttons and waits for
+        Uses pyppeteer to interact with "Show More" buttons and waits for
         the page to load additional data.
 
         Returns:
@@ -334,16 +329,21 @@ class EversourcePlaywrightClient:
             try:
                 # Try different "Show More" button selectors
                 selectors = [
-                    "button:has-text('Show More')",
-                    "a:has-text('Show More')",
-                    "[class*='show-more' i]",
-                    "[id*='show-more' i]",
+                    "button",  # Simple button selector since pyppeteer doesn't support :has-text()
                 ]
 
                 for selector in selectors:
-                    if await self._page.query_selector(selector):
-                        show_more_selector = selector
-                        logger.debug("Found Show More button: %s", selector)
+                    elements = await self._page.querySelectorAll(selector)
+                    for elem in elements:
+                        try:
+                            text = await self._page.evaluate("elem => elem.textContent", elem)
+                            if text and "Show More" in text:
+                                show_more_selector = selector
+                                logger.debug("Found Show More button")
+                                break
+                        except Exception:
+                            continue
+                    if show_more_selector:
                         break
 
                 if not show_more_selector:
@@ -352,13 +352,15 @@ class EversourcePlaywrightClient:
 
                 # Click the Show More button
                 logger.info("Found Show More button (page %d), clicking", page + 1)
-                await self._page.click(show_more_selector)
+                show_more_btn = await self._page.querySelector("button")
+                if show_more_btn:
+                    await show_more_btn.click()
 
                 # Rate limiting: wait before next page
                 await asyncio.sleep(_PAGINATION_REQUEST_DELAY_SECONDS)
 
                 # Wait for new data to load
-                await self._page.wait_for_load_state("networkidle", timeout=_PAGE_LOAD_TIMEOUT_MS)
+                await asyncio.sleep(2)
 
                 # Get updated HTML
                 html = await self._page.content()
@@ -375,9 +377,12 @@ class EversourcePlaywrightClient:
 
     async def async_close(self) -> None:
         """Clean up browser page."""
-        if self._page and not self._page.is_closed():
-            await self._page.close()
-            logger.debug("Closed Eversource browser page")
+        if self._page:
+            try:
+                await self._page.close()
+                logger.debug("Closed Eversource browser page")
+            except Exception as err:
+                logger.debug("Error closing page: %s", err)
 
 
 # ============================================================================

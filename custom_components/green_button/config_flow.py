@@ -238,12 +238,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=const.DOMAIN):
     async def _validate_eversource_credentials(
         self, username: str, password: str
     ) -> dict[str, str]:
-        """Validate Eversource credentials by attempting login and data fetch using Playwright.
+        """Validate Eversource credentials by attempting login and data fetch using pyppeteer.
 
         Returns:
             Empty dict if validation succeeded, or dict with error keys.
         """
-        from playwright.async_api import async_playwright
+        import pyppeteer
 
         from .parsers.eversource_playwright import (
             EversourcePlaywrightClient,
@@ -251,44 +251,56 @@ class ConfigFlow(config_entries.ConfigFlow, domain=const.DOMAIN):
             parse_usage_table,
         )
 
-        # Launch browser for validation
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+        browser = None
+        try:
+            # Launch browser for validation
+            _LOGGER.debug("Launching browser for credential validation")
+            browser = await pyppeteer.launch(headless=True)
 
             client = EversourcePlaywrightClient(
                 username=username, password=password, browser=browser
             )
-            try:
-                login_ok = await client.async_login()
-                if not login_ok:
-                    # Check logs to distinguish between bad credentials vs server error
-                    _LOGGER.warning(
-                        "Eversource login failed for user %s. "
-                        "Check logs for details (may be invalid credentials or server error).",
-                        username,
-                    )
-                    return {"base": "invalid_eversource_credentials"}
 
-                # Verify we can fetch usage data
-                html = await client.async_fetch_usage_history()
-                rows = parse_usage_table(html)
-                if not rows:
-                    _LOGGER.warning("Eversource login succeeded but no usage data returned")
-                    return {"base": "eversource_connection_error"}
+            login_ok = await client.async_login()
+            if not login_ok:
+                # Check logs to distinguish between bad credentials vs server error
+                _LOGGER.warning(
+                    "Eversource login failed for user %s. "
+                    "Check logs for details (may be invalid credentials or server error).",
+                    username,
+                )
+                return {"base": "invalid_eversource_credentials"}
 
-                _LOGGER.info(
-                    "Eversource credential validation succeeded, found %d usage rows",
-                    len(rows),
-                )
-                return {}
-            except EversourcePlaywrightError as err:
-                _LOGGER.exception("Eversource data fetch failed during validation: %s", err)
+            # Verify we can fetch usage data
+            html = await client.async_fetch_usage_history()
+            rows = parse_usage_table(html)
+            if not rows:
+                _LOGGER.warning("Eversource login succeeded but no usage data returned")
                 return {"base": "eversource_connection_error"}
-            except Exception as err:
-                _LOGGER.exception(
-                    "Unexpected error validating Eversource credentials: %s", err
-                )
-                return {"base": "eversource_connection_error"}
+
+            await client.async_close()
+
+            _LOGGER.info(
+                "Eversource credential validation succeeded, found %d usage rows",
+                len(rows),
+            )
+            return {}
+        except EversourcePlaywrightError as err:
+            _LOGGER.exception("Eversource data fetch failed during validation: %s", err)
+            return {"base": "eversource_connection_error"}
+        except Exception as err:
+            _LOGGER.exception(
+                "Unexpected error validating Eversource credentials: %s", err
+            )
+            return {"base": "eversource_connection_error"}
+        finally:
+            # Close browser
+            if browser:
+                try:
+                    await browser.close()
+                    _LOGGER.debug("Closed validation browser")
+                except Exception as err:
+                    _LOGGER.debug("Error closing validation browser: %s", err)
 
 
 class OptionsFlowHandler(config_entries.OptionsFlow):
